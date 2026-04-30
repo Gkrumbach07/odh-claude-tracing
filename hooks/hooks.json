@@ -5,6 +5,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure_venv.sh\""
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/.venv/bin/python3\" \"${CLAUDE_PLUGIN_ROOT}/scripts/init_tracing.py\" \"${CLAUDE_PLUGIN_DATA}\""
           }
         ]
