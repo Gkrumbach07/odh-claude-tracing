@@ -1,0 +1,16 @@
+{
+  "name": "odh-claude-tracing",
+  "version": "0.1.0",
+  "description": "Production MLflow tracing for Claude Code skills. Captures traces (tool calls, timing, cost) and sends them to the team's shared MLflow instance.",
+  "author": {
+    "name": "opendatahub-io"
+  },
+  "homepage": "https://github.com/opendatahub-io/odh-claude-tracing",
+  "license": "Apache-2.0",
+  "keywords": [
+    "tracing",
+    "mlflow",
+    "observability",
+    "openshift"
+  ]
+}
