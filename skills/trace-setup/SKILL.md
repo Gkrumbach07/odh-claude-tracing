@@ -11,7 +11,6 @@ One-command setup for MLflow tracing using `mlflow autolog claude`. Everything i
 ## Prerequisites
 
 - **Python >= 3.11** — required by mlflow
-- **VPN** — the ROSA MLflow cluster must be reachable from your machine
 - **`oc` CLI** (optional) — for browser-based SSO auth. Install from the [OpenShift console](https://console-openshift-console.apps.rosa.ui-razzmatazz.swih.p3.openshiftapps.com) → **?** → **Command line tools**. Without `oc`, you can paste a token manually.
 
 ## Constants
@@ -54,7 +53,7 @@ Read `.claude/settings.local.json`, remove the `MLFLOW_*` env vars and the Stop 
 > 4. Move everything to `.claude/settings.local.json` (never committed)
 > 5. Restore `.claude/settings.json` to its original state
 >
-> **Prerequisites:** Python >= 3.11, VPN connected to ROSA cluster
+> **Prerequisites:** Python >= 3.11
 >
 > After setup, restart Claude Code and all interactions will be traced to:
 > `MLFLOW_URI` (experiment: `DEFAULT_EXPERIMENT`)
@@ -111,7 +110,7 @@ rm -f $TMPKUBE
 
 **Use the same temp file for both commands.** Do NOT call `mktemp` twice.
 
-If `oc login` fails with a connection error, remind the user they need VPN access to the ROSA cluster.
+If `oc login` fails with a connection error, check the ROSA API URL is correct and the cluster is reachable.
 
 ### Path B: oc not available
 
