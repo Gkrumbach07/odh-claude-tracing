@@ -7,7 +7,7 @@ argument-hint: "[--status | --disable]"
 
 # Production Tracing Setup
 
-One-command setup for MLflow tracing using `mlflow autolog claude`. Everything is written to `settings.local.json` so nothing gets committed.
+One-command setup for MLflow tracing. Everything is stored in `settings.local.json` so nothing gets committed. The skill owns setup, status, and disable — it does not use `mlflow autolog claude --status` or `--disable` since those only read `settings.json`.
 
 ## Prerequisites
 
@@ -28,16 +28,58 @@ One-command setup for MLflow tracing using `mlflow autolog claude`. Everything i
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--status` | false | Check current tracing status and exit |
-| `--disable` | false | Disable tracing and exit |
+| `--status` | false | Run health checks and exit |
+| `--disable` | false | Remove tracing config and exit |
+| (no args) | — | Full setup flow |
 
 ## Step 1: Handle --status
 
-Check `.claude/settings.local.json` for tracing config (env vars and hooks). Report whether tracing is configured and what the settings are. Exit after reporting.
+Read `.claude/settings.local.json` and run these checks:
+
+1. **Config exists** — check `env.MLFLOW_TRACKING_URI`, `env.MLFLOW_TRACKING_TOKEN`, `env.MLFLOW_EXPERIMENT_NAME` are present
+2. **Stop hook exists** — check `hooks.Stop` contains an entry with `mlflow autolog claude stop-hook`
+3. **SessionStart hook exists** — check `hooks.SessionStart` contains the status echo entry
+4. **MLflow reachable** — use the token and workspace to call the MLflow experiments API:
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}" \
+     -X POST \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -H "X-Mlflow-Workspace: $WORKSPACE" \
+     -d '{"max_results": 1}' \
+     "$MLFLOW_URI/api/2.0/mlflow/experiments/search"
+   ```
+   - 200 = connected
+   - 401/403 = token expired
+   - Other = connection issue
+5. **Experiment exists** — parse the response to confirm the experiment is accessible
+
+Report a table:
+
+| Check | Status |
+|-------|--------|
+| Config in settings.local.json | OK / MISSING |
+| Stop hook | OK / MISSING |
+| SessionStart hook | OK / MISSING |
+| MLflow connection | OK / TOKEN EXPIRED / UNREACHABLE |
+| Experiment `<name>` | OK / NOT FOUND |
+
+If token is expired, suggest: "Re-run `/trace-setup` to refresh your token."
+
+Exit after reporting.
 
 ## Step 2: Handle --disable
 
-Read `.claude/settings.local.json`, remove the `MLFLOW_*` env vars, the Stop hook, and the SessionStart hook (the tracing status check), write it back. Tell the user to restart Claude Code. Exit.
+Read `.claude/settings.local.json`:
+
+1. Remove all `MLFLOW_*` keys from the `env` block
+2. Remove the Stop hook entry containing `mlflow autolog claude stop-hook`
+3. Remove the SessionStart hook entry
+4. Write the file back (preserving permissions and other config)
+
+Report: "Tracing disabled. Restart Claude Code to take effect."
+
+Exit.
 
 ## Step 3: Present the plan and confirm
 
@@ -48,9 +90,10 @@ Read `.claude/settings.local.json`, remove the `MLFLOW_*` env vars, the Stop hoo
 > This will:
 > 1. Ensure `mlflow` is installed (in project `.venv` if needed)
 > 2. Authenticate to the ROSA cluster (opens browser for SSO — your current `oc` context is NOT affected)
-> 3. Run `mlflow autolog claude` to generate the tracing hook config
+> 3. Run `mlflow autolog claude` to generate the tracing hook
 > 4. Move everything to `.claude/settings.local.json` (never committed)
-> 5. Restore `.claude/settings.json` to its original state
+> 5. Add a SessionStart hook to confirm tracing is active on each session
+> 6. Restore `.claude/settings.json` to its original state
 >
 > **Prerequisites:** Python >= 3.11
 >
@@ -72,7 +115,6 @@ which mlflow 2>/dev/null || .venv/bin/mlflow --version 2>/dev/null
 If not found, create a venv and install. Use `uv` if available (faster), otherwise `python3 -m venv`:
 
 ```bash
-# Prefer uv if available
 which uv 2>/dev/null && echo "UV" || echo "PIP"
 ```
 
@@ -88,7 +130,7 @@ python3 -m venv .venv
 .venv/bin/pip install -q "mlflow[genai]>=3.5"
 ```
 
-Store the mlflow path as `MLFLOW_CMD` (either `mlflow` or `.venv/bin/mlflow`). Use the **absolute path** for `.venv/bin/mlflow` since hooks run in a bare shell without PATH modifications.
+Store the mlflow path as `MLFLOW_CMD`. Use the **absolute path** for `.venv/bin/mlflow` since hooks run in a bare shell.
 
 ## Step 5: Authenticate to ROSA
 
@@ -140,20 +182,20 @@ $MLFLOW_CMD autolog claude \
   -n DEFAULT_EXPERIMENT
 ```
 
-This writes `env` (MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME, MLFLOW_CLAUDE_TRACING_ENABLED) and `hooks.Stop` to `.claude/settings.json`.
+This writes `env` and `hooks.Stop` to `.claude/settings.json`.
 
 ### 6c: Move config to settings.local.json
 
 Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.local.json` (existing local config). Merge the mlflow entries into settings.local.json:
 
-1. Copy the entire `hooks` block from settings.json into settings.local.json
+1. Copy the entire `hooks.Stop` block from settings.json into settings.local.json
 2. Copy the `env` block entries from settings.json into settings.local.json's `env`
 3. Add these additional env vars to settings.local.json:
    - `MLFLOW_TRACKING_TOKEN`: `<token from Step 5>`
    - `MLFLOW_WORKSPACE`: `DEFAULT_WORKSPACE`
    - `MLFLOW_ENABLE_WORKSPACES`: `true`
-4. If the hook command is bare `mlflow autolog claude stop-hook` but mlflow is only in `.venv/bin/`, replace `mlflow` with the absolute path (e.g., `/Users/me/project/.venv/bin/mlflow autolog claude stop-hook`)
-5. Add a `SessionStart` hook that shows tracing status on session start. Use the same `$MLFLOW_CMD` path (absolute if from venv):
+4. If the hook command is bare `mlflow autolog claude stop-hook` but mlflow is only in `.venv/bin/`, replace `mlflow` with the absolute path
+5. Add a `SessionStart` hook that runs the status check using the absolute mlflow path:
 
 ```json
 "SessionStart": [
@@ -162,16 +204,20 @@ Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.lo
     "hooks": [
       {
         "type": "command",
-        "command": "echo '📊 MLflow tracing enabled → $MLFLOW_TRACKING_URI'"
+        "command": "<absolute_mlflow_path> autolog claude --status"
       }
     ]
   }
 ]
 ```
 
-This prints a confirmation message on every session start so users know tracing is active. The `$MLFLOW_TRACKING_URI` env var is set from the `env` block in the same settings.local.json file.
+**Note:** Yes, `mlflow autolog claude --status` won't see settings.local.json config. But it WILL see the env vars that Claude Code loaded from settings.local.json's `env` block — at SessionStart time, `MLFLOW_TRACKING_URI` and `MLFLOW_CLAUDE_TRACING_ENABLED` are already in the environment. So the status check should detect tracing as enabled via env vars, even though settings.json is empty.
 
-**Note:** Do NOT use `mlflow autolog claude --status` here — it only checks `settings.json`, not `settings.local.json`, so it reports "not enabled" even when tracing works.
+If testing shows this still reports "not enabled", fall back to a curl-based health check instead:
+
+```json
+"command": "curl -sf -X POST -H \"Authorization: Bearer $MLFLOW_TRACKING_TOKEN\" -H \"Content-Type: application/json\" -H \"X-Mlflow-Workspace: $MLFLOW_WORKSPACE\" -d '{\"max_results\":1}' \"$MLFLOW_TRACKING_URI/api/2.0/mlflow/experiments/search\" > /dev/null && echo '📊 MLflow tracing active' || echo '⚠️ MLflow tracing error — run /trace-setup --status'"
+```
 
 ### 6d: Restore settings.json
 
@@ -198,6 +244,7 @@ Restore the original. If settings.json didn't exist before, remove the one mlflo
 ## Rules
 
 - **Everything in settings.local.json** — never leave mlflow config in settings.json
+- **Own the lifecycle** — `--status` and `--disable` read/write settings.local.json directly, do NOT delegate to `mlflow autolog claude --status/--disable`
 - **Present plan first, then execute** — show what will happen, get yes/no, then run
 - **Backup and restore settings.json** — snapshot before mlflow writes, restore after moving config
 - **Never switch oc context** — always `KUBECONFIG=$(mktemp)`, reuse the same tempfile
