@@ -195,7 +195,7 @@ Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.lo
    - `MLFLOW_WORKSPACE`: `DEFAULT_WORKSPACE`
    - `MLFLOW_ENABLE_WORKSPACES`: `true`
 4. If the hook command is bare `mlflow autolog claude stop-hook` but mlflow is only in `.venv/bin/`, replace `mlflow` with the absolute path
-5. Add a `SessionStart` hook that runs the status check using the absolute mlflow path:
+5. Add a `SessionStart` hook that checks the MLflow connection and prints the result as context for Claude. Use `statusMessage` for a spinner during execution, and stdout so Claude can relay the result:
 
 ```json
 "SessionStart": [
@@ -204,20 +204,15 @@ Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.lo
     "hooks": [
       {
         "type": "command",
-        "command": "<absolute_mlflow_path> autolog claude --status"
+        "statusMessage": "Checking MLflow tracing...",
+        "command": "curl -sf -X POST -H \"Authorization: Bearer $MLFLOW_TRACKING_TOKEN\" -H \"Content-Type: application/json\" -H \"X-Mlflow-Workspace: $MLFLOW_WORKSPACE\" -d '{\"max_results\":1}' \"$MLFLOW_TRACKING_URI/api/2.0/mlflow/experiments/search\" > /dev/null && echo 'MLflow tracing: connected' || echo 'MLflow tracing: NOT connected'"
       }
     ]
   }
 ]
 ```
 
-**Note:** Yes, `mlflow autolog claude --status` won't see settings.local.json config. But it WILL see the env vars that Claude Code loaded from settings.local.json's `env` block — at SessionStart time, `MLFLOW_TRACKING_URI` and `MLFLOW_CLAUDE_TRACING_ENABLED` are already in the environment. So the status check should detect tracing as enabled via env vars, even though settings.json is empty.
-
-If testing shows this still reports "not enabled", fall back to a curl-based health check instead:
-
-```json
-"command": "curl -sf -X POST -H \"Authorization: Bearer $MLFLOW_TRACKING_TOKEN\" -H \"Content-Type: application/json\" -H \"X-Mlflow-Workspace: $MLFLOW_WORKSPACE\" -d '{\"max_results\":1}' \"$MLFLOW_TRACKING_URI/api/2.0/mlflow/experiments/search\" > /dev/null && echo '📊 MLflow tracing active' || echo '⚠️ MLflow tracing error — run /trace-setup --status'"
-```
+The stdout from this hook becomes context that Claude sees. Claude should relay the tracing status in a very brief one-line mention at the start of its first response (e.g., "MLflow tracing connected." or "MLflow tracing not connected — run `/trace-setup --status`").
 
 ### 6d: Restore settings.json
 
