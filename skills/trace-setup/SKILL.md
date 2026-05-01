@@ -162,14 +162,16 @@ Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.lo
     "hooks": [
       {
         "type": "command",
-        "command": "<absolute_mlflow_path> autolog claude --status"
+        "command": "echo '📊 MLflow tracing enabled → $MLFLOW_TRACKING_URI'"
       }
     ]
   }
 ]
 ```
 
-This prints the tracing connection status every time Claude Code starts, so users know tracing is active and whether the token is still valid.
+This prints a confirmation message on every session start so users know tracing is active. The `$MLFLOW_TRACKING_URI` env var is set from the `env` block in the same settings.local.json file.
+
+**Note:** Do NOT use `mlflow autolog claude --status` here — it only checks `settings.json`, not `settings.local.json`, so it reports "not enabled" even when tracing works.
 
 ### 6d: Restore settings.json
 
