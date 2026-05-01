@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, AskUserQuestion
 
 # Production Tracing Setup
 
-One-command setup for MLflow tracing. After this runs, every Claude Code interaction logs a trace to the team's shared MLflow instance.
+One-command setup for MLflow tracing using `mlflow autolog claude`. After this runs, every Claude Code interaction logs a trace to the team's shared MLflow instance.
 
 ## Constants
 
@@ -16,77 +16,75 @@ One-command setup for MLflow tracing. After this runs, every Claude Code interac
 | ROSA_API | `https://api.ui-razzmatazz.swih.p3.openshiftapps.com:443` |
 | ROSA_CONSOLE | `https://console-openshift-console.apps.rosa.ui-razzmatazz.swih.p3.openshiftapps.com` |
 | DEFAULT_EXPERIMENT | `odh-dashboard-skills` |
-| DEFAULT_WORKSPACE | `mlflow-agent-eval-harness` |
-| VENV_PATH | `${CLAUDE_PLUGIN_ROOT}/.venv` |
-| VENV_PYTHON | `${CLAUDE_PLUGIN_ROOT}/.venv/bin/python3` |
 
 ## Step 0: Parse Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--status` | false | Check current tracing status and exit |
-| `--remove` | false | Disable tracing and exit |
+| `--disable` | false | Disable tracing and exit |
 | `--tracking-uri <uri>` | `MLFLOW_URI` | Override MLflow server |
 | `--experiment <name>` | `DEFAULT_EXPERIMENT` | MLflow experiment |
-| `--workspace <name>` | `DEFAULT_WORKSPACE` | MLflow workspace |
 
 ## Step 1: Handle --status
 
-Run the status check and report results. Exit after.
-
 ```bash
-"${VENV_PYTHON}" "${CLAUDE_PLUGIN_ROOT}/scripts/configure_tracing.py" status
+mlflow autolog claude --status
 ```
 
-If not configured, suggest running `/trace-setup`. If token expired, suggest re-running `/trace-setup` to refresh.
-
-## Step 2: Handle --remove
+Report the output. If mlflow is not found, check for it in a `.venv`:
 
 ```bash
-"${VENV_PYTHON}" "${CLAUDE_PLUGIN_ROOT}/scripts/configure_tracing.py" remove
+.venv/bin/mlflow autolog claude --status 2>/dev/null || pip install "mlflow[genai]>=3.5"
+```
+
+Exit after reporting.
+
+## Step 2: Handle --disable
+
+```bash
+mlflow autolog claude --disable
 ```
 
 Tell the user tracing is disabled. Restart Claude Code to take effect. Exit.
 
 ## Step 3: Present the plan and confirm
 
-**Do NOT start doing things yet.** First, present exactly what will happen:
+**Do NOT start doing things yet.** Present what will happen:
 
 > **MLflow Tracing Setup**
 >
 > This will:
-> 1. Ensure MLflow is installed in the plugin's virtual environment
+> 1. Ensure `mlflow` is installed
 > 2. Authenticate to the ROSA cluster (opens browser for SSO — your current `oc` context is NOT affected)
-> 3. Test the MLflow connection
-> 4. Save tracing config locally (never committed)
+> 3. Run `mlflow autolog claude` to configure the Stop hook
+> 4. Add MLflow env vars (tracking URI, token, workspace) to `.claude/settings.json`
 >
 > After setup, restart Claude Code and all interactions will be traced to:
-> `MLFLOW_URI` (experiment: `DEFAULT_EXPERIMENT`, workspace: `DEFAULT_WORKSPACE`)
+> `MLFLOW_URI` (experiment: `DEFAULT_EXPERIMENT`)
 >
 > **Proceed?**
 
-Use AskUserQuestion with Yes/No. If No, exit immediately.
+Use AskUserQuestion with Yes/No. If No, exit.
 
-## Step 4: Install MLflow (automatic)
-
-Check if the plugin venv has mlflow. If not, install it silently. Do NOT ask the user about Python environments — always use the plugin's own venv.
+## Step 4: Ensure mlflow is installed
 
 ```bash
-"${VENV_PYTHON}" -c "import mlflow; print(f'mlflow {mlflow.__version__}')" 2>/dev/null
+which mlflow 2>/dev/null || .venv/bin/mlflow --version 2>/dev/null
 ```
 
-If missing or venv doesn't exist:
+If not found anywhere, create a venv and install:
 
 ```bash
-python3 -m venv "${CLAUDE_PLUGIN_ROOT}/.venv"
-"${VENV_PYTHON}" -m pip install -q "mlflow[genai]>=3.5"
+python3 -m venv .venv
+.venv/bin/pip install -q "mlflow[genai]>=3.5"
 ```
 
-Report: "Installed mlflow X.Y.Z" or "MLflow X.Y.Z already installed". Do not stop or ask questions.
+Determine the mlflow binary path for subsequent commands. Store it (e.g., `MLFLOW_CMD=mlflow` or `MLFLOW_CMD=.venv/bin/mlflow`).
 
-## Step 5: Authenticate to ROSA (automatic)
+## Step 5: Authenticate to ROSA
 
-Get an OpenShift bearer token using a throwaway kubeconfig. The user's current `oc` context is untouched.
+Get an OpenShift bearer token using a throwaway kubeconfig.
 
 Check if `oc` is available:
 
@@ -96,25 +94,18 @@ which oc 2>/dev/null && echo "OC_AVAILABLE" || echo "OC_MISSING"
 
 ### Path A: oc available
 
-Run the login directly — it opens the browser automatically:
+Run the login directly — create a temp kubeconfig, login, extract token, clean up. **Use the same temp file for both commands.**
 
 ```bash
-TMPKUBE=$(mktemp) && KUBECONFIG=$TMPKUBE oc login --web https://api.ui-razzmatazz.swih.p3.openshiftapps.com:443 2>&1
+TMPKUBE=$(mktemp)
+KUBECONFIG=$TMPKUBE oc login --web https://api.ui-razzmatazz.swih.p3.openshiftapps.com:443
+TOKEN=$(KUBECONFIG=$TMPKUBE oc whoami --show-token)
+rm -f $TMPKUBE
 ```
-
-Then extract the token:
-
-```bash
-KUBECONFIG=$TMPKUBE oc whoami --show-token
-```
-
-**Important:** Both commands must use the SAME temp file. Create it once with `mktemp`, store the path, and reuse it. Do NOT call `mktemp` twice — the second call creates a different file that has no login state.
-
-Clean up: `rm -f $TMPKUBE`
 
 ### Path B: oc not available
 
-Tell the user to get a token manually (this is the only time we ask the user to do something):
+Ask the user to get a token from the ROSA console:
 
 > `oc` not found. Get a token from the ROSA console:
 > 1. Open: `ROSA_CONSOLE`
@@ -123,40 +114,43 @@ Tell the user to get a token manually (this is the only time we ask the user to 
 
 Use AskUserQuestion to collect the token.
 
-## Step 6: Configure and verify
-
-Run the setup script with the token:
+## Step 6: Run mlflow autolog claude
 
 ```bash
-"${VENV_PYTHON}" "${CLAUDE_PLUGIN_ROOT}/scripts/configure_tracing.py" setup \
-  --uri <tracking_uri> \
-  --token <token> \
-  --experiment <experiment> \
-  --workspace <workspace>
+$MLFLOW_CMD autolog claude \
+  -u <tracking_uri> \
+  -n <experiment>
 ```
 
-The script tests the connection before saving. If it fails:
-- **Authentication failed** — token is bad. Go back to Step 5.
-- **Connection failed** — network issue. Check VPN.
+Then add the auth env vars to `.claude/settings.json` — the `env` block. Read the current settings.json, merge in:
+
+```json
+{
+  "env": {
+    "MLFLOW_TRACKING_TOKEN": "<token>",
+    "MLFLOW_WORKSPACE": "mlflow-agent-eval-harness",
+    "MLFLOW_ENABLE_WORKSPACES": "true"
+  }
+}
+```
+
+**Important:** `mlflow autolog claude` sets `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME`, and `MLFLOW_CLAUDE_TRACING_ENABLED` in the env block. You only need to add `MLFLOW_TRACKING_TOKEN`, `MLFLOW_WORKSPACE`, and `MLFLOW_ENABLE_WORKSPACES`.
+
+Also check: if the hook command is bare `mlflow autolog claude stop-hook` but mlflow isn't on the system PATH, replace it with the full path (e.g., `.venv/bin/mlflow autolog claude stop-hook`).
 
 ## Step 7: Report
 
-On success, report concisely:
-
 > **Tracing enabled.**
-> - MLflow: `<uri>` (experiment: `<experiment>`, workspace: `<workspace>`)
-> - Config: `~/.claude/odh-claude-tracing/tracing.json`
-> - **Restart Claude Code** for hooks to take effect
+> - MLflow: `<uri>` (experiment: `<experiment>`)
+> - **Restart Claude Code** for the hook to take effect
 >
 > Token expires in ~24h. Re-run `/trace-setup` to refresh.
-> Run `/trace-setup --status` to check, `/trace-setup --remove` to disable.
+> Run `/trace-setup --status` to check, `/trace-setup --disable` to turn off.
 
 ## Rules
 
-- **Present plan first, then execute** — always show what will happen and get confirmation before doing anything
-- **Never ask about Python setup** — always use the plugin's .venv at `${CLAUDE_PLUGIN_ROOT}/.venv`
+- **Present plan first, then execute** — show what will happen, get yes/no, then run everything
+- **Use `mlflow autolog claude`** — don't write custom hooks or scripts
 - **Never switch oc context** — always `KUBECONFIG=$(mktemp)` for ROSA auth, reuse the same tempfile
-- **Run everything automatically** — the only user interaction is the initial yes/no confirmation and (if no `oc`) pasting a token
-- **Use `${VENV_PYTHON}` for all script calls** — not bare `python3`
-- **Include `--workspace` in all configure_tracing.py calls** — the MLflow instance requires workspace context
-- **No chatter** — don't explain what each command does while running. Report results, not process.
+- **Run everything automatically** — only interaction is the initial yes/no and (if no `oc`) pasting a token
+- **No chatter** — report results, not process
