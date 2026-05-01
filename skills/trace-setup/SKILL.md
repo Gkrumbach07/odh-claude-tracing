@@ -8,6 +8,12 @@ allowed-tools: Bash, Read, AskUserQuestion
 
 One-command setup for MLflow tracing using `mlflow autolog claude`. Everything is written to `settings.local.json` so nothing gets committed.
 
+## Prerequisites
+
+- **Python >= 3.11** — required by mlflow
+- **VPN** — the ROSA MLflow cluster must be reachable from your machine
+- **`oc` CLI** (optional) — for browser-based SSO auth. Install from the [OpenShift console](https://console-openshift-console.apps.rosa.ui-razzmatazz.swih.p3.openshiftapps.com) → **?** → **Command line tools**. Without `oc`, you can paste a token manually.
+
 ## Constants
 
 | Constant | Value |
@@ -48,6 +54,8 @@ Read `.claude/settings.local.json`, remove the `MLFLOW_*` env vars and the Stop 
 > 4. Move everything to `.claude/settings.local.json` (never committed)
 > 5. Restore `.claude/settings.json` to its original state
 >
+> **Prerequisites:** Python >= 3.11, VPN connected to ROSA cluster
+>
 > After setup, restart Claude Code and all interactions will be traced to:
 > `MLFLOW_URI` (experiment: `DEFAULT_EXPERIMENT`)
 >
@@ -57,18 +65,32 @@ Use AskUserQuestion with Yes/No. If No, exit.
 
 ## Step 4: Ensure mlflow is installed
 
+Check for mlflow on PATH or in a local venv:
+
 ```bash
 which mlflow 2>/dev/null || .venv/bin/mlflow --version 2>/dev/null
 ```
 
-If not found, create a venv and install:
+If not found, create a venv and install. Use `uv` if available (faster), otherwise `python3 -m venv`:
 
+```bash
+# Prefer uv if available
+which uv 2>/dev/null && echo "UV" || echo "PIP"
+```
+
+With uv:
+```bash
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python3 "mlflow[genai]>=3.5"
+```
+
+Without uv:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -q "mlflow[genai]>=3.5"
 ```
 
-Store the mlflow path as `MLFLOW_CMD` (either `mlflow` or `.venv/bin/mlflow`).
+Store the mlflow path as `MLFLOW_CMD` (either `mlflow` or `.venv/bin/mlflow`). Use the **absolute path** for `.venv/bin/mlflow` since hooks run in a bare shell without PATH modifications.
 
 ## Step 5: Authenticate to ROSA
 
@@ -87,13 +109,19 @@ TOKEN=$(KUBECONFIG=$TMPKUBE oc whoami --show-token)
 rm -f $TMPKUBE
 ```
 
-**Use the same temp file for both commands.**
+**Use the same temp file for both commands.** Do NOT call `mktemp` twice.
+
+If `oc login` fails with a connection error, remind the user they need VPN access to the ROSA cluster.
 
 ### Path B: oc not available
 
-> `oc` not found. Get a token from the ROSA console:
+> `oc` CLI not found. You can either:
+>
+> **Install oc:** Open the [ROSA console](https://console-openshift-console.apps.rosa.ui-razzmatazz.swih.p3.openshiftapps.com) → **?** (help) → **Command line tools** → download for your OS.
+>
+> **Or paste a token manually:**
 > 1. Open: `ROSA_CONSOLE`
-> 2. Log in → click your username → **"Copy login command"** → **"Display Token"**
+> 2. Log in → click your username (top right) → **"Copy login command"** → **"Display Token"**
 > 3. Paste the API token below
 
 Use AskUserQuestion to collect the token.
@@ -126,15 +154,19 @@ Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.lo
    - `MLFLOW_TRACKING_TOKEN`: `<token from Step 5>`
    - `MLFLOW_WORKSPACE`: `DEFAULT_WORKSPACE`
    - `MLFLOW_ENABLE_WORKSPACES`: `true`
-4. If the hook command is bare `mlflow` but mlflow is only in `.venv/bin/`, replace with the full path in the hook command
+4. If the hook command is bare `mlflow autolog claude stop-hook` but mlflow is only in `.venv/bin/`, replace `mlflow` with the absolute path (e.g., `/Users/me/project/.venv/bin/mlflow autolog claude stop-hook`)
 
 ### 6d: Restore settings.json
 
 ```bash
-mv .claude/settings.json.bak .claude/settings.json 2>/dev/null || echo '{}' > .claude/settings.json
+if [ -f .claude/settings.json.bak ]; then
+  mv .claude/settings.json.bak .claude/settings.json
+else
+  rm -f .claude/settings.json
+fi
 ```
 
-If there was no backup (settings.json didn't exist before), write an empty `{}`.
+Restore the original. If settings.json didn't exist before, remove the one mlflow created.
 
 ## Step 7: Report
 
@@ -152,5 +184,7 @@ If there was no backup (settings.json didn't exist before), write an empty `{}`.
 - **Present plan first, then execute** — show what will happen, get yes/no, then run
 - **Backup and restore settings.json** — snapshot before mlflow writes, restore after moving config
 - **Never switch oc context** — always `KUBECONFIG=$(mktemp)`, reuse the same tempfile
+- **Use absolute paths in hooks** — the Stop hook runs in a bare shell, `.venv/bin/mlflow` won't resolve without the full path
+- **Prefer uv over pip** — faster venv creation and install
 - **Run everything automatically** — only interaction is the initial yes/no and (if no `oc`) pasting a token
 - **No chatter** — report results, not process
