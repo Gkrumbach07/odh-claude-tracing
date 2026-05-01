@@ -2,7 +2,7 @@
 name: trace-setup
 description: Set up MLflow production tracing for Claude Code skills. Captures traces (tool calls, LLM interactions, timing, cost) and sends them to the team's shared MLflow instance. Use when asked to enable tracing, set up MLflow, track skill metrics, or opt into production monitoring.
 allowed-tools: Bash, Read, AskUserQuestion
-argument-hint: "[--status | --disable | --tracking-uri <uri> --experiment <name>]"
+argument-hint: "[--status | --disable]"
 ---
 
 # Production Tracing Setup
@@ -30,8 +30,6 @@ One-command setup for MLflow tracing using `mlflow autolog claude`. Everything i
 |----------|---------|-------------|
 | `--status` | false | Check current tracing status and exit |
 | `--disable` | false | Disable tracing and exit |
-| `--tracking-uri <uri>` | `MLFLOW_URI` | Override MLflow server |
-| `--experiment <name>` | `DEFAULT_EXPERIMENT` | MLflow experiment |
 
 ## Step 1: Handle --status
 
@@ -138,8 +136,8 @@ cp .claude/settings.json .claude/settings.json.bak 2>/dev/null || true
 
 ```bash
 $MLFLOW_CMD autolog claude \
-  -u <tracking_uri> \
-  -n <experiment>
+  -u MLFLOW_URI \
+  -n DEFAULT_EXPERIMENT
 ```
 
 This writes `env` (MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME, MLFLOW_CLAUDE_TRACING_ENABLED) and `hooks.Stop` to `.claude/settings.json`.

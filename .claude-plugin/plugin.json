@@ -1,6 +1,6 @@
 {
   "name": "odh-claude-tracing",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Production MLflow tracing for Claude Code skills. Captures traces (tool calls, timing, cost) and sends them to the team's shared MLflow instance.",
   "author": {
     "name": "opendatahub-io"
