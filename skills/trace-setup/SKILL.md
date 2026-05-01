@@ -38,7 +38,7 @@ Check `.claude/settings.local.json` for tracing config (env vars and hooks). Rep
 
 ## Step 2: Handle --disable
 
-Read `.claude/settings.local.json`, remove the `MLFLOW_*` env vars and the Stop hook, write it back. Tell the user to restart Claude Code. Exit.
+Read `.claude/settings.local.json`, remove the `MLFLOW_*` env vars, the Stop hook, and the SessionStart hook (the tracing status check), write it back. Tell the user to restart Claude Code. Exit.
 
 ## Step 3: Present the plan and confirm
 
@@ -154,6 +154,23 @@ Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.lo
    - `MLFLOW_WORKSPACE`: `DEFAULT_WORKSPACE`
    - `MLFLOW_ENABLE_WORKSPACES`: `true`
 4. If the hook command is bare `mlflow autolog claude stop-hook` but mlflow is only in `.venv/bin/`, replace `mlflow` with the absolute path (e.g., `/Users/me/project/.venv/bin/mlflow autolog claude stop-hook`)
+5. Add a `SessionStart` hook that shows tracing status on session start. Use the same `$MLFLOW_CMD` path (absolute if from venv):
+
+```json
+"SessionStart": [
+  {
+    "matcher": "",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "<absolute_mlflow_path> autolog claude --status"
+      }
+    ]
+  }
+]
+```
+
+This prints the tracing connection status every time Claude Code starts, so users know tracing is active and whether the token is still valid.
 
 ### 6d: Restore settings.json
 
