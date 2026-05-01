@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, AskUserQuestion
 
 # Production Tracing Setup
 
-One-command setup for MLflow tracing using `mlflow autolog claude`. After this runs, every Claude Code interaction logs a trace to the team's shared MLflow instance.
+One-command setup for MLflow tracing using `mlflow autolog claude`. Everything is written to `settings.local.json` so nothing gets committed.
 
 ## Constants
 
@@ -16,6 +16,7 @@ One-command setup for MLflow tracing using `mlflow autolog claude`. After this r
 | ROSA_API | `https://api.ui-razzmatazz.swih.p3.openshiftapps.com:443` |
 | ROSA_CONSOLE | `https://console-openshift-console.apps.rosa.ui-razzmatazz.swih.p3.openshiftapps.com` |
 | DEFAULT_EXPERIMENT | `odh-dashboard-skills` |
+| DEFAULT_WORKSPACE | `mlflow-agent-eval-harness` |
 
 ## Step 0: Parse Arguments
 
@@ -28,25 +29,11 @@ One-command setup for MLflow tracing using `mlflow autolog claude`. After this r
 
 ## Step 1: Handle --status
 
-```bash
-mlflow autolog claude --status
-```
-
-Report the output. If mlflow is not found, check for it in a `.venv`:
-
-```bash
-.venv/bin/mlflow autolog claude --status 2>/dev/null || pip install "mlflow[genai]>=3.5"
-```
-
-Exit after reporting.
+Check `.claude/settings.local.json` for tracing config (env vars and hooks). Report whether tracing is configured and what the settings are. Exit after reporting.
 
 ## Step 2: Handle --disable
 
-```bash
-mlflow autolog claude --disable
-```
-
-Tell the user tracing is disabled. Restart Claude Code to take effect. Exit.
+Read `.claude/settings.local.json`, remove the `MLFLOW_*` env vars and the Stop hook, write it back. Tell the user to restart Claude Code. Exit.
 
 ## Step 3: Present the plan and confirm
 
@@ -55,10 +42,11 @@ Tell the user tracing is disabled. Restart Claude Code to take effect. Exit.
 > **MLflow Tracing Setup**
 >
 > This will:
-> 1. Ensure `mlflow` is installed
+> 1. Ensure `mlflow` is installed (in project `.venv` if needed)
 > 2. Authenticate to the ROSA cluster (opens browser for SSO — your current `oc` context is NOT affected)
-> 3. Run `mlflow autolog claude` to configure the Stop hook
-> 4. Add MLflow env vars (tracking URI, token, workspace) to `.claude/settings.json`
+> 3. Run `mlflow autolog claude` to generate the tracing hook config
+> 4. Move everything to `.claude/settings.local.json` (never committed)
+> 5. Restore `.claude/settings.json` to its original state
 >
 > After setup, restart Claude Code and all interactions will be traced to:
 > `MLFLOW_URI` (experiment: `DEFAULT_EXPERIMENT`)
@@ -73,28 +61,24 @@ Use AskUserQuestion with Yes/No. If No, exit.
 which mlflow 2>/dev/null || .venv/bin/mlflow --version 2>/dev/null
 ```
 
-If not found anywhere, create a venv and install:
+If not found, create a venv and install:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -q "mlflow[genai]>=3.5"
 ```
 
-Determine the mlflow binary path for subsequent commands. Store it (e.g., `MLFLOW_CMD=mlflow` or `MLFLOW_CMD=.venv/bin/mlflow`).
+Store the mlflow path as `MLFLOW_CMD` (either `mlflow` or `.venv/bin/mlflow`).
 
 ## Step 5: Authenticate to ROSA
 
 Get an OpenShift bearer token using a throwaway kubeconfig.
-
-Check if `oc` is available:
 
 ```bash
 which oc 2>/dev/null && echo "OC_AVAILABLE" || echo "OC_MISSING"
 ```
 
 ### Path A: oc available
-
-Run the login directly — create a temp kubeconfig, login, extract token, clean up. **Use the same temp file for both commands.**
 
 ```bash
 TMPKUBE=$(mktemp)
@@ -103,9 +87,9 @@ TOKEN=$(KUBECONFIG=$TMPKUBE oc whoami --show-token)
 rm -f $TMPKUBE
 ```
 
-### Path B: oc not available
+**Use the same temp file for both commands.**
 
-Ask the user to get a token from the ROSA console:
+### Path B: oc not available
 
 > `oc` not found. Get a token from the ROSA console:
 > 1. Open: `ROSA_CONSOLE`
@@ -114,7 +98,15 @@ Ask the user to get a token from the ROSA console:
 
 Use AskUserQuestion to collect the token.
 
-## Step 6: Run mlflow autolog claude
+## Step 6: Generate config and move to settings.local.json
+
+### 6a: Snapshot settings.json before mlflow writes to it
+
+```bash
+cp .claude/settings.json .claude/settings.json.bak 2>/dev/null || true
+```
+
+### 6b: Run mlflow autolog claude
 
 ```bash
 $MLFLOW_CMD autolog claude \
@@ -122,26 +114,33 @@ $MLFLOW_CMD autolog claude \
   -n <experiment>
 ```
 
-Then add the auth env vars to `.claude/settings.json` — the `env` block. Read the current settings.json, merge in:
+This writes `env` (MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME, MLFLOW_CLAUDE_TRACING_ENABLED) and `hooks.Stop` to `.claude/settings.json`.
 
-```json
-{
-  "env": {
-    "MLFLOW_TRACKING_TOKEN": "<token>",
-    "MLFLOW_WORKSPACE": "mlflow-agent-eval-harness",
-    "MLFLOW_ENABLE_WORKSPACES": "true"
-  }
-}
+### 6c: Move config to settings.local.json
+
+Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.local.json` (existing local config). Merge the mlflow entries into settings.local.json:
+
+1. Copy the entire `hooks` block from settings.json into settings.local.json
+2. Copy the `env` block entries from settings.json into settings.local.json's `env`
+3. Add these additional env vars to settings.local.json:
+   - `MLFLOW_TRACKING_TOKEN`: `<token from Step 5>`
+   - `MLFLOW_WORKSPACE`: `DEFAULT_WORKSPACE`
+   - `MLFLOW_ENABLE_WORKSPACES`: `true`
+4. If the hook command is bare `mlflow` but mlflow is only in `.venv/bin/`, replace with the full path in the hook command
+
+### 6d: Restore settings.json
+
+```bash
+mv .claude/settings.json.bak .claude/settings.json 2>/dev/null || echo '{}' > .claude/settings.json
 ```
 
-**Important:** `mlflow autolog claude` sets `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME`, and `MLFLOW_CLAUDE_TRACING_ENABLED` in the env block. You only need to add `MLFLOW_TRACKING_TOKEN`, `MLFLOW_WORKSPACE`, and `MLFLOW_ENABLE_WORKSPACES`.
-
-Also check: if the hook command is bare `mlflow autolog claude stop-hook` but mlflow isn't on the system PATH, replace it with the full path (e.g., `.venv/bin/mlflow autolog claude stop-hook`).
+If there was no backup (settings.json didn't exist before), write an empty `{}`.
 
 ## Step 7: Report
 
 > **Tracing enabled.**
-> - MLflow: `<uri>` (experiment: `<experiment>`)
+> - MLflow: `<uri>` (experiment: `<experiment>`, workspace: `<workspace>`)
+> - Config: `.claude/settings.local.json` (not committed)
 > - **Restart Claude Code** for the hook to take effect
 >
 > Token expires in ~24h. Re-run `/trace-setup` to refresh.
@@ -149,8 +148,9 @@ Also check: if the hook command is bare `mlflow autolog claude stop-hook` but ml
 
 ## Rules
 
-- **Present plan first, then execute** — show what will happen, get yes/no, then run everything
-- **Use `mlflow autolog claude`** — don't write custom hooks or scripts
-- **Never switch oc context** — always `KUBECONFIG=$(mktemp)` for ROSA auth, reuse the same tempfile
+- **Everything in settings.local.json** — never leave mlflow config in settings.json
+- **Present plan first, then execute** — show what will happen, get yes/no, then run
+- **Backup and restore settings.json** — snapshot before mlflow writes, restore after moving config
+- **Never switch oc context** — always `KUBECONFIG=$(mktemp)`, reuse the same tempfile
 - **Run everything automatically** — only interaction is the initial yes/no and (if no `oc`) pasting a token
 - **No chatter** — report results, not process
