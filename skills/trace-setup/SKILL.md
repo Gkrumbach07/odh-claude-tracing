@@ -2,6 +2,7 @@
 name: trace-setup
 description: Set up MLflow production tracing for Claude Code skills. Captures traces (tool calls, LLM interactions, timing, cost) and sends them to the team's shared MLflow instance. Use when asked to enable tracing, set up MLflow, track skill metrics, or opt into production monitoring.
 allowed-tools: Bash, Read, AskUserQuestion
+argument-hint: "[--status | --disable | --tracking-uri <uri> --experiment <name>]"
 ---
 
 # Production Tracing Setup
