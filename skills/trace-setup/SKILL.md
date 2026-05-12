@@ -107,7 +107,7 @@ Adds a `UserPromptExpansion` hook entry so tracing auto-enables when the named s
      "hooks": [
        {
          "type": "command",
-         "command": "sed -i.bak 's/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/' .claude/settings.local.json && rm -f .claude/settings.local.json.bak && echo 'MLflow tracing: ON (<skill> invoked). IMPORTANT: You MUST turn tracing off when this skill fully completes (all follow-ups resolved, final output delivered). Run: sed -i.bak '\"'\"'s/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/'\"'\"' .claude/settings.local.json && rm -f .claude/settings.local.json.bak — then announce: MLflow tracing: OFF'"
+         "command": "printf '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptExpansion\",\"additionalContext\":\"TRACING INSTRUCTION: You MUST immediately use the Edit tool to change MLFLOW_CLAUDE_TRACING_ENABLED from false to true in .claude/settings.local.json, then announce: MLflow tracing: ON. When this skill fully completes (all follow-ups resolved, final output delivered), use the Edit tool to change it back to false and announce: MLflow tracing: OFF.\"}}'"
        }
      ]
    }
@@ -116,7 +116,7 @@ Adds a `UserPromptExpansion` hook entry so tracing auto-enables when the named s
 7. Write the file back.
 8. Announce: **"Skill `<skill>` added to traced skills. Tracing will auto-enable when `/<skill>` is invoked."**
 
-**Note on the hook command**: The echo output becomes context that Claude sees. It includes an instruction telling Claude to turn tracing back off when the skill work is fully complete. Claude judges when the skill is done (even across multi-turn follow-ups) and runs the sed command to disable tracing, then announces "MLflow tracing: OFF".
+**Important: Why JSON output, not plain text.** `UserPromptExpansion` hooks ignore plain stdout — only JSON with `additionalContext` in `hookSpecificOutput` is visible to Claude. The hook outputs structured JSON that injects a tracing instruction into the prompt context. Claude then uses the Edit tool to flip the setting, which triggers Claude Code to re-read settings.local.json (external `sed` edits are not detected).
 
 Exit after.
 
@@ -205,7 +205,7 @@ Exit after reporting.
 Read `.claude/settings.local.json`:
 
 1. Remove all `MLFLOW_*` keys from the `env` block
-2. Remove any `UserPromptExpansion` hook entries that contain `MLFLOW_CLAUDE_TRACING_ENABLED` in their command
+2. Remove any `UserPromptExpansion` hook entries that contain `MLFLOW_CLAUDE_TRACING_ENABLED` in their command or `additionalContext`
 3. If any hook array becomes empty after removal, remove the array entirely
 4. If the `hooks` object becomes empty, remove it entirely
 5. Write the file back (preserving other config)
@@ -341,13 +341,15 @@ Preserve all existing config in settings.local.json (permissions, other env vars
 
 1. User runs `/trace-setup --skills=preflight` (or `/trace-setup` then `/trace-setup on preflight`)
 2. This adds a `UserPromptExpansion` hook in settings.local.json with `"matcher": "preflight"`
-3. When the user types `/preflight`, the hook fires before the skill expands:
-   - Flips `MLFLOW_CLAUDE_TRACING_ENABLED` from `false` to `true` via sed
-   - Echoes a message back to Claude: "MLflow tracing: ON (preflight invoked). IMPORTANT: You MUST turn tracing off when this skill fully completes..."
-4. Claude sees this instruction as context and follows it
-5. The skill runs — possibly across multiple turns with follow-up questions
-6. When Claude determines the skill work is fully complete, it runs the sed command to flip tracing back to `false` and announces "MLflow tracing: OFF"
-7. As a safety net, the plugin's Stop hook also resets tracing to `false` on session exit (when skills are configured)
+3. When the user types `/preflight`, the hook fires and outputs JSON with `additionalContext`
+4. Claude sees the tracing instruction injected into the prompt context
+5. Claude uses the Edit tool to change `MLFLOW_CLAUDE_TRACING_ENABLED` from `false` to `true` in settings.local.json — this triggers Claude Code to re-read settings, enabling tracing
+6. Claude announces "MLflow tracing: ON" and proceeds with the skill
+7. The skill runs — possibly across multiple turns with follow-up questions
+8. When Claude determines the skill work is fully complete, it uses Edit to change ENABLED back to `false` and announces "MLflow tracing: OFF"
+9. As a safety net, the plugin's Stop hook also resets tracing to `false` on session exit
+
+**Why Edit tool, not sed**: Claude Code only re-reads settings.local.json when it detects internal file changes (via Edit/Write tools). External modifications (like `sed` from a hook subprocess) are not detected, so the tracing flag wouldn't take effect.
 
 ## Rules
 
