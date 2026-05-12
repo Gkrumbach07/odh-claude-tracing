@@ -1,13 +1,29 @@
 ---
 name: trace-setup
 description: Set up MLflow production tracing for Claude Code skills. Captures traces (tool calls, LLM interactions, timing, cost) and sends them to the team's shared MLflow instance. Use when asked to enable tracing, set up MLflow, track skill metrics, or opt into production monitoring.
-allowed-tools: Bash, Read, AskUserQuestion
-argument-hint: "[--status | --disable]"
+allowed-tools: Bash, Read, Edit, Write, AskUserQuestion
+argument-hint: "[on [skill] | off [skill] | reauth | status | uninstall] [--trigger=always|skill|manual] [--skills=a,b,c]"
 ---
 
 # Production Tracing Setup
 
-One-command setup for MLflow tracing. Everything is stored in `settings.local.json` so nothing gets committed. The skill owns setup, status, and disable — it does not use `mlflow autolog claude --status` or `--disable` since those only read `settings.json`.
+One-command setup for MLflow tracing. Config lives in `settings.local.json` (never committed). Hooks ship with the plugin via `hooks/hooks.json` (auto-registered). Supports live on/off toggling and per-skill triggers.
+
+## Key Discovery
+
+Editing `MLFLOW_CLAUDE_TRACING_ENABLED` in `.claude/settings.local.json` toggles tracing **per-turn in real time** — no restart needed. This enables:
+- Live `on`/`off` commands
+- Hook-based triggers that auto-enable tracing for specific skills
+- Context-based auto-disable when a skill completes
+
+## Architecture
+
+| What | Where | Why |
+|------|-------|-----|
+| Stop hook (sends traces) | `hooks/hooks.json` (plugin) | Static, auto-registered when plugin is enabled |
+| SessionStart hook (health check) | `hooks/hooks.json` (plugin) | Static, auto-registered |
+| Env vars (token, URI, etc.) | `.claude/settings.local.json` | Per-user secrets, never committed |
+| PreToolUse hooks (per-skill `if` entries) | `.claude/settings.local.json` | Dynamic, user-configured |
 
 ## Prerequisites
 
@@ -26,20 +42,135 @@ One-command setup for MLflow tracing. Everything is stored in `settings.local.js
 
 ## Step 0: Parse Arguments
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--status` | false | Run health checks and exit |
-| `--disable` | false | Remove tracing config and exit |
-| (no args) | — | Full setup flow |
+| Argument | Description |
+|----------|-------------|
+| (none) | Full install/reconfigure flow |
+| `on` | Turn tracing ON immediately (global live toggle) |
+| `off` | Turn tracing OFF immediately (global live toggle) |
+| `on <skill>` | Add a skill to the traced skills list (adds `if`-filtered PreToolUse hook entry) |
+| `off <skill>` | Remove a skill from the traced skills list (removes its `if` entry) |
+| `reauth` | Refresh expired ROSA token (skips full install) |
+| `status` | Health check and exit |
+| `uninstall` | Remove all tracing config |
 
-## Step 1: Handle --status
+Install-time options (only during install):
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--trigger=always` | ✓ | Tracing always on — every turn is traced |
+| `--trigger=skill` | | Tracing off by default; auto-enables for specific skills via `if`-filtered hooks |
+| `--trigger=manual` | | Tracing off by default; use `/trace-setup on` and `/trace-setup off` to control |
+| `--skills=a,b,c` | | Shorthand to add multiple skills during install (only with `--trigger=skill`) |
+
+---
+
+## Step 1: Handle `on` (no skill name — global toggle)
+
+Quick operation — no confirmation needed.
+
+1. Read `.claude/settings.local.json`
+2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
+3. Check the current value of `MLFLOW_CLAUDE_TRACING_ENABLED`
+   - If already `"true"`, announce **"MLflow tracing: already ON"** and exit
+4. Edit the file: change `"MLFLOW_CLAUDE_TRACING_ENABLED": "false"` to `"MLFLOW_CLAUDE_TRACING_ENABLED": "true"`
+5. Announce: **"MLflow tracing: ON"**
+
+Exit immediately after.
+
+## Step 2: Handle `off` (no skill name — global toggle)
+
+Quick operation — no confirmation needed.
+
+1. Read `.claude/settings.local.json`
+2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
+3. Check the current value of `MLFLOW_CLAUDE_TRACING_ENABLED`
+   - If already `"false"`, announce **"MLflow tracing: already OFF"** and exit
+4. Edit the file: change `"MLFLOW_CLAUDE_TRACING_ENABLED": "true"` to `"MLFLOW_CLAUDE_TRACING_ENABLED": "false"`
+5. Announce: **"MLflow tracing: OFF"**
+
+Exit immediately after.
+
+---
+
+## Step 3: Handle `on <skill>` (add skill to traced list)
+
+Adds an `if`-filtered hook entry so tracing auto-enables when the named skill is invoked. Requires `--trigger=skill` mode.
+
+1. Read `.claude/settings.local.json`
+2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
+3. Ensure `MLFLOW_TRACING_TRIGGER` is `"skill"`. If it's `"always"`, warn: "Trigger mode is `always` — all turns are already traced. Switch to `skill` mode first with `/trace-setup --trigger=skill`." and exit. If it's `"manual"`, update it to `"skill"`.
+4. Look for `hooks.PreToolUse` array. If it doesn't exist, create it.
+5. Find the entry with `"matcher": "Skill"`. If it doesn't exist, create it with an empty `hooks` array.
+6. Check if an `if` entry for this skill already exists (e.g., `"if": "Skill(<skill>:*)"`). If so, announce **"Skill `<skill>` is already traced."** and exit.
+7. Add a new hook entry inside the matcher's `hooks` array:
+
+   ```json
+   {
+     "type": "command",
+     "if": "Skill(<skill>:*)",
+     "command": "sed -i.bak 's/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/' .claude/settings.local.json && rm -f .claude/settings.local.json.bak && echo 'MLflow tracing: ON (<skill> invoked). IMPORTANT: You MUST turn tracing off when this skill fully completes (all follow-ups resolved, final output delivered). Run: sed -i.bak '\"'\"'s/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/'\"'\"' .claude/settings.local.json && rm -f .claude/settings.local.json.bak — then announce: MLflow tracing: OFF'"
+   }
+   ```
+
+8. Write the file back.
+9. Announce: **"Skill `<skill>` added to traced skills. Tracing will auto-enable when `/<skill>` is invoked."**
+
+**Note on the hook command**: The echo output becomes context that Claude sees. It includes an instruction telling Claude to turn tracing back off when the skill work is fully complete. Claude judges when the skill is done (even across multi-turn follow-ups) and runs the sed command to disable tracing, then announces "MLflow tracing: OFF".
+
+Exit after.
+
+## Step 4: Handle `off <skill>` (remove skill from traced list)
+
+Removes the `if`-filtered hook entry for the named skill.
+
+1. Read `.claude/settings.local.json`
+2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
+3. Find `hooks.PreToolUse` → entry with `"matcher": "Skill"` → hook with `"if": "Skill(<skill>:*)"`.
+4. If not found, announce **"Skill `<skill>` is not in the traced skills list."** and exit.
+5. Remove that hook entry from the array.
+6. If the matcher's `hooks` array is now empty, remove the entire matcher entry.
+7. If the `PreToolUse` array is now empty, remove it entirely.
+8. Write the file back.
+9. Announce: **"Skill `<skill>` removed from traced skills."**
+
+Exit after.
+
+---
+
+## Step 5: Handle `reauth`
+
+Quick token refresh — skips mlflow install, hook setup, and reconfiguration. Only re-authenticates to ROSA and updates the token.
+
+1. Read `.claude/settings.local.json`
+2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
+3. Authenticate to ROSA using the same flow as Step 10 (oc login with throwaway kubeconfig, or manual token paste if oc is unavailable). **No confirmation needed** — proceed directly.
+4. Update `MLFLOW_TRACKING_TOKEN` in the `env` block of `.claude/settings.local.json` with the new token.
+5. Verify the new token works:
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}" \
+     -X POST \
+     -H "Authorization: Bearer $NEW_TOKEN" \
+     -H "Content-Type: application/json" \
+     -H "X-Mlflow-Workspace: $WORKSPACE" \
+     -d '{"max_results": 1}' \
+     "$MLFLOW_URI/api/2.0/mlflow/experiments/search"
+   ```
+   - If 200: announce **"Token refreshed. MLflow tracing: connected."**
+   - If not 200: announce **"Token refreshed but connection failed (HTTP <code>). Check `/trace-setup --status`."**
+
+Exit after.
+
+---
+
+## Step 6: Handle `status`
 
 Read `.claude/settings.local.json` and run these checks:
 
 1. **Config exists** — check `env.MLFLOW_TRACKING_URI`, `env.MLFLOW_TRACKING_TOKEN`, `env.MLFLOW_EXPERIMENT_NAME` are present
-2. **Stop hook exists** — check `hooks.Stop` contains an entry with `mlflow autolog claude stop-hook`
-3. **SessionStart hook exists** — check `hooks.SessionStart` contains the status echo entry
-4. **MLflow reachable** — use the token and workspace to call the MLflow experiments API:
+2. **Tracing state** — read `env.MLFLOW_CLAUDE_TRACING_ENABLED` (true/false)
+3. **Trigger mode** — read `env.MLFLOW_TRACING_TRIGGER` (always/skill/manual)
+4. **Traced skills** — if trigger=skill, list all skills that have `if` entries in the PreToolUse Skill matcher (extract skill names from `"if": "Skill(<name>:*)"` patterns)
+5. **MLflow reachable** — use the token and workspace to call the MLflow experiments API:
    ```bash
    curl -s -o /dev/null -w "%{http_code}" \
      -X POST \
@@ -52,59 +183,67 @@ Read `.claude/settings.local.json` and run these checks:
    - 200 = connected
    - 401/403 = token expired
    - Other = connection issue
-5. **Experiment exists** — parse the response to confirm the experiment is accessible
+6. **Experiment exists** — parse the response to confirm the experiment is accessible
 
 Report a table:
 
 | Check | Status |
 |-------|--------|
 | Config in settings.local.json | OK / MISSING |
-| Stop hook | OK / MISSING |
-| SessionStart hook | OK / MISSING |
+| Tracing state | ON / OFF |
+| Trigger mode | always / skill / manual |
+| Traced skills | preflight, jira-triage / (none) / N/A |
 | MLflow connection | OK / TOKEN EXPIRED / UNREACHABLE |
 | Experiment `<name>` | OK / NOT FOUND |
 
-If token is expired, suggest: "Re-run `/trace-setup` to refresh your token."
+If token is expired, suggest: "Run `/trace-setup reauth` to refresh your token."
 
 Exit after reporting.
 
-## Step 2: Handle --disable
+---
+
+## Step 7: Handle `uninstall`
 
 Read `.claude/settings.local.json`:
 
 1. Remove all `MLFLOW_*` keys from the `env` block
-2. Remove the Stop hook entry containing `mlflow autolog claude stop-hook`
-3. Remove the SessionStart hook entry
-4. Write the file back (preserving permissions and other config)
+2. Remove any PreToolUse hook entries with matcher `Skill` that contain `MLFLOW_CLAUDE_TRACING_ENABLED`
+3. If any hook array becomes empty after removal, remove the array entirely
+4. If the `hooks` object becomes empty, remove it entirely
+5. Write the file back (preserving other config)
 
-Report: "Tracing disabled. Restart Claude Code to take effect."
+Report: "Tracing removed. Plugin hooks (Stop/SessionStart) are still registered but will no-op without the env vars."
 
 Exit.
 
-## Step 3: Present the plan and confirm
+---
+
+## Step 8: Install flow — present plan and confirm
 
 **Do NOT start doing things yet.** Present what will happen:
 
 > **MLflow Tracing Setup**
 >
 > This will:
-> 1. Ensure `mlflow` is installed (in project `.venv` if needed)
+> 1. Ensure `mlflow` is installed (needed for the stop-hook that sends traces)
 > 2. Authenticate to the ROSA cluster (opens browser for SSO — your current `oc` context is NOT affected)
-> 3. Run `mlflow autolog claude` to generate the tracing hook
-> 4. Move everything to `.claude/settings.local.json` (never committed)
-> 5. Add a SessionStart hook to confirm tracing is active on each session
-> 6. Restore `.claude/settings.json` to its original state
+> 3. Write env vars to `.claude/settings.local.json` (never committed)
+>
+> **Trigger mode: `<trigger>`**
+> - `always` — every turn is traced
+> - `skill` — tracing auto-enables for specific skills; use `/trace-setup on <skill>` to add
+> - `manual` — use `/trace-setup on` and `/trace-setup off` to control
 >
 > **Prerequisites:** Python >= 3.11
 >
-> After setup, restart Claude Code and all interactions will be traced to:
+> After setup, traces go to:
 > `MLFLOW_URI` (experiment: `DEFAULT_EXPERIMENT`)
 >
 > **Proceed?**
 
 Use AskUserQuestion with Yes/No. If No, exit.
 
-## Step 4: Ensure mlflow is installed
+## Step 9: Ensure mlflow is installed
 
 Check for mlflow on PATH or in a local venv:
 
@@ -130,9 +269,9 @@ python3 -m venv .venv
 .venv/bin/pip install -q "mlflow[genai]>=3.5"
 ```
 
-Store the mlflow path as `MLFLOW_CMD`. Use the **absolute path** for `.venv/bin/mlflow` since hooks run in a bare shell.
+Store the resolved absolute path as `MLFLOW_CMD` (e.g., `/opt/homebrew/bin/mlflow` or `/path/to/project/.venv/bin/mlflow`). The plugin's `hooks/hooks.json` references `mlflow` by name — if mlflow is only in a local `.venv`, the user may need to ensure it's on PATH or symlinked.
 
-## Step 5: Authenticate to ROSA
+## Step 10: Authenticate to ROSA
 
 Get an OpenShift bearer token using a throwaway kubeconfig.
 
@@ -151,8 +290,6 @@ rm -f $TMPKUBE
 
 **Use the same temp file for both commands.** Do NOT call `mktemp` twice.
 
-If `oc login` fails with a connection error, check the ROSA API URL is correct and the cluster is reachable.
-
 ### Path B: oc not available
 
 > `oc` CLI not found. You can either:
@@ -166,84 +303,69 @@ If `oc login` fails with a connection error, check the ROSA API URL is correct a
 
 Use AskUserQuestion to collect the token.
 
-## Step 6: Generate config and move to settings.local.json
+## Step 11: Write env vars to settings.local.json
 
-### 6a: Snapshot settings.json before mlflow writes to it
-
-```bash
-cp .claude/settings.json .claude/settings.json.bak 2>/dev/null || true
-```
-
-### 6b: Run mlflow autolog claude
-
-```bash
-$MLFLOW_CMD autolog claude \
-  -u MLFLOW_URI \
-  -n DEFAULT_EXPERIMENT
-```
-
-This writes `env` and `hooks.Stop` to `.claude/settings.json`.
-
-### 6c: Move config to settings.local.json
-
-Read `.claude/settings.json` (what mlflow just wrote). Read `.claude/settings.local.json` (existing local config). Merge the mlflow entries into settings.local.json:
-
-1. Copy the entire `hooks.Stop` block from settings.json into settings.local.json
-2. Copy the `env` block entries from settings.json into settings.local.json's `env`
-3. Add these additional env vars to settings.local.json:
-   - `MLFLOW_TRACKING_TOKEN`: `<token from Step 5>`
-   - `MLFLOW_WORKSPACE`: `DEFAULT_WORKSPACE`
-   - `MLFLOW_ENABLE_WORKSPACES`: `true`
-4. If the hook command is bare `mlflow autolog claude stop-hook` but mlflow is only in `.venv/bin/`, replace `mlflow` with the absolute path
-5. Add a `SessionStart` hook that checks the MLflow connection and prints the result as context for Claude. Use `statusMessage` for a spinner during execution, and stdout so Claude can relay the result:
+Read `.claude/settings.local.json` (or create it if it doesn't exist). Merge these env vars into the `env` block:
 
 ```json
-"SessionStart": [
-  {
-    "matcher": "",
-    "hooks": [
-      {
-        "type": "command",
-        "statusMessage": "Checking MLflow tracing...",
-        "command": "curl -sf -X POST -H \"Authorization: Bearer $MLFLOW_TRACKING_TOKEN\" -H \"Content-Type: application/json\" -H \"X-Mlflow-Workspace: $MLFLOW_WORKSPACE\" -d '{\"max_results\":1}' \"$MLFLOW_TRACKING_URI/api/2.0/mlflow/experiments/search\" > /dev/null && echo 'MLflow tracing: connected' || echo 'MLflow tracing: NOT connected'"
-      }
-    ]
+{
+  "env": {
+    "MLFLOW_CLAUDE_TRACING_ENABLED": "<true if always, false if skill/manual>",
+    "MLFLOW_TRACKING_URI": "https://rh-ai.apps.rosa.ui-razzmatazz.swih.p3.openshiftapps.com/mlflow",
+    "MLFLOW_EXPERIMENT_NAME": "odh-dashboard-skills",
+    "MLFLOW_TRACKING_TOKEN": "<token from Step 10>",
+    "MLFLOW_WORKSPACE": "mlflow-agent-eval-harness",
+    "MLFLOW_ENABLE_WORKSPACES": "true",
+    "MLFLOW_TRACING_TRIGGER": "<trigger mode>"
   }
-]
+}
 ```
 
-The stdout from this hook becomes context that Claude sees. Claude should relay the tracing status in a very brief one-line mention at the start of its first response (e.g., "MLflow tracing connected." or "MLflow tracing not connected — run `/trace-setup --status`").
+If `--trigger=skill` and `--skills=a,b,c` was provided, also add per-skill PreToolUse hook entries following the same pattern as Step 3 (`on <skill>`).
 
-### 6d: Restore settings.json
+Preserve all existing config in settings.local.json (permissions, other env vars, other hooks).
 
-```bash
-if [ -f .claude/settings.json.bak ]; then
-  mv .claude/settings.json.bak .claude/settings.json
-else
-  rm -f .claude/settings.json
-fi
-```
+## Step 12: Report
 
-Restore the original. If settings.json didn't exist before, remove the one mlflow created.
-
-## Step 7: Report
-
-> **Tracing enabled.**
+> **Tracing installed.**
 > - MLflow: `<uri>` (experiment: `<experiment>`, workspace: `<workspace>`)
+> - Trigger: `<trigger mode>`
+> - Traced skills: `<list>` (or "none — use `/trace-setup on <skill>` to add")
 > - Config: `.claude/settings.local.json` (not committed)
-> - **Restart Claude Code** for the hook to take effect
 >
-> Token expires in ~24h. Re-run `/trace-setup` to refresh.
-> Run `/trace-setup --status` to check, `/trace-setup --disable` to turn off.
+> Token expires in ~24h. Run `/trace-setup reauth` to refresh.
+>
+> **Commands:**
+> - `/trace-setup on` — turn tracing on now (global)
+> - `/trace-setup off` — turn tracing off now (global)
+> - `/trace-setup on <skill>` — add a skill to auto-trace list
+> - `/trace-setup off <skill>` — remove a skill from auto-trace list
+> - `/trace-setup reauth` — refresh expired token
+> - `/trace-setup --status` — check health and list traced skills
+> - `/trace-setup uninstall` — remove tracing
+
+## How per-skill tracing works
+
+1. User runs `/trace-setup --trigger=skill` then `/trace-setup on preflight`
+2. This adds a `PreToolUse` hook in settings.local.json with `"matcher": "Skill"` and `"if": "Skill(preflight:*)"`
+3. When the user runs `/preflight`, the hook fires:
+   - Flips `MLFLOW_CLAUDE_TRACING_ENABLED` from `false` to `true` via sed
+   - Echoes a message back to Claude: "MLflow tracing: ON (preflight invoked). IMPORTANT: You MUST turn tracing off when this skill fully completes..."
+4. Claude sees this instruction as context and follows it
+5. The skill runs — possibly across multiple turns with follow-up questions
+6. When Claude determines the skill work is fully complete, it runs the sed command to flip tracing back to `false` and announces "MLflow tracing: OFF"
+7. As a safety net, the plugin's Stop hook also resets tracing to `false` on session exit (for non-always modes)
 
 ## Rules
 
-- **Everything in settings.local.json** — never leave mlflow config in settings.json
-- **Own the lifecycle** — `--status` and `--disable` read/write settings.local.json directly, do NOT delegate to `mlflow autolog claude --status/--disable`
-- **Present plan first, then execute** — show what will happen, get yes/no, then run
-- **Backup and restore settings.json** — snapshot before mlflow writes, restore after moving config
+- **Env vars in settings.local.json** — never committed, per-user secrets
+- **Static hooks in hooks/hooks.json** — ship with the plugin, auto-registered
+- **Dynamic hooks (PreToolUse per-skill) in settings.local.json** — user-configured
+- **`on`/`off` (global) are instant** — no confirmation, no chatter, just edit and announce
+- **`on`/`off` with skill name** modifies the PreToolUse hook array in settings.local.json
+- **Present plan first for install** — show what will happen, get yes/no, then run
 - **Never switch oc context** — always `KUBECONFIG=$(mktemp)`, reuse the same tempfile
-- **Use absolute paths in hooks** — the Stop hook runs in a bare shell, `.venv/bin/mlflow` won't resolve without the full path
-- **Prefer uv over pip** — faster venv creation and install
-- **Run everything automatically** — only interaction is the initial yes/no and (if no `oc`) pasting a token
+- **Always announce state changes** — when tracing turns on or off, say so clearly
+- **Per-skill hooks use `if` field** — `"if": "Skill(<name>:*)"` filters on the skill name argument
+- **Auto-disable via context** — the hook echo instructs Claude to turn tracing off when the skill completes
 - **No chatter** — report results, not process

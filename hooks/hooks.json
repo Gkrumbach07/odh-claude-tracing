@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -z \"$MLFLOW_CLAUDE_TRACING_ENABLED\" ] || ! which mlflow >/dev/null 2>&1; then exit 0; fi; mlflow autolog claude stop-hook; if [ \"$MLFLOW_TRACING_TRIGGER\" != \"always\" ]; then sed -i.bak 's/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/' .claude/settings.local.json 2>/dev/null && rm -f .claude/settings.local.json.bak; fi"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Checking MLflow tracing...",
+            "command": "if [ -z \"$MLFLOW_TRACKING_URI\" ]; then exit 0; fi; curl -sf -X POST -H \"Authorization: Bearer $MLFLOW_TRACKING_TOKEN\" -H \"Content-Type: application/json\" -H \"X-Mlflow-Workspace: $MLFLOW_WORKSPACE\" -d '{\"max_results\":1}' \"$MLFLOW_TRACKING_URI/api/2.0/mlflow/experiments/search\" > /dev/null && echo \"MLflow tracing: connected (trigger: $MLFLOW_TRACING_TRIGGER, state: $MLFLOW_CLAUDE_TRACING_ENABLED)\" || echo 'MLflow tracing: NOT connected (run /trace-setup reauth to refresh token)'"
+          }
+        ]
+      }
+    ]
+  }
+}
