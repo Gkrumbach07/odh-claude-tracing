@@ -60,7 +60,7 @@ Install-time options (only during install):
 | `--trigger=always` | ✓ | Tracing always on — every turn is traced |
 | `--trigger=skill` | | Tracing off by default; auto-enables for specific skills via `if`-filtered hooks |
 | `--trigger=manual` | | Tracing off by default; use `/trace-setup on` and `/trace-setup off` to control |
-| `--skills=a,b,c` | | Shorthand to add multiple skills during install (only with `--trigger=skill`) |
+| `--skills=a,b,c` | | Add skills to auto-trace list; implies `--trigger=skill` |
 
 ---
 
@@ -321,7 +321,7 @@ Read `.claude/settings.local.json` (or create it if it doesn't exist). Merge the
 }
 ```
 
-If `--trigger=skill` and `--skills=a,b,c` was provided, also add per-skill PreToolUse hook entries following the same pattern as Step 3 (`on <skill>`).
+If `--skills=a,b,c` was provided (implies `--trigger=skill`), also add per-skill PreToolUse hook entries following the same pattern as Step 3 (`on <skill>`).
 
 Preserve all existing config in settings.local.json (permissions, other env vars, other hooks).
 

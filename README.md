@@ -64,8 +64,8 @@ With `--trigger=skill`, you choose exactly which skills are traced:
 /trace-setup on preflight
 /trace-setup on jira-triage
 
-# Or add skills during install
-/trace-setup --trigger=skill --skills=preflight,jira-triage
+# Or add skills during install (implies --trigger=skill)
+/trace-setup --skills=preflight,jira-triage
 
 # Remove a skill from tracing
 /trace-setup off preflight
