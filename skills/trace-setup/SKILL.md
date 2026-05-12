@@ -23,7 +23,9 @@ Editing `MLFLOW_CLAUDE_TRACING_ENABLED` in `.claude/settings.local.json` toggles
 | Stop hook (sends traces) | `hooks/hooks.json` (plugin) | Static, auto-registered when plugin is enabled |
 | SessionStart hook (health check) | `hooks/hooks.json` (plugin) | Static, auto-registered |
 | Env vars (token, URI, etc.) | `.claude/settings.local.json` | Per-user secrets, never committed |
-| PreToolUse hooks (per-skill `if` entries) | `.claude/settings.local.json` | Dynamic, user-configured |
+| UserPromptExpansion hooks (per-skill) | `.claude/settings.local.json` | Dynamic, user-configured |
+
+**Important**: Skills invoked via `/skillname` are prompt expansions, NOT tool calls. Use `UserPromptExpansion` hooks (not `PreToolUse`) to intercept skill invocations. The matcher matches directly on the skill name.
 
 ## Prerequisites
 
@@ -90,26 +92,29 @@ Exit immediately after.
 
 ## Step 3: Handle `on <skill>` (add skill to traced list)
 
-Adds an `if`-filtered hook entry so tracing auto-enables when the named skill is invoked.
+Adds a `UserPromptExpansion` hook entry so tracing auto-enables when the named skill is invoked via `/skillname`.
 
 1. Read `.claude/settings.local.json`
 2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
 3. If `MLFLOW_CLAUDE_TRACING_ENABLED` is `"true"` and no skills are currently in the traced list, warn: "Tracing is always on — all turns are already traced. Run `/trace-setup off` first if you want per-skill tracing." and exit.
-4. Look for `hooks.PreToolUse` array. If it doesn't exist, create it.
-5. Find the entry with `"matcher": "Skill"`. If it doesn't exist, create it with an empty `hooks` array.
-6. Check if an `if` entry for this skill already exists (e.g., `"if": "Skill(<skill>:*)"`). If so, announce **"Skill `<skill>` is already traced."** and exit.
-7. Add a new hook entry inside the matcher's `hooks` array:
+4. Look for `hooks.UserPromptExpansion` array. If it doesn't exist, create it.
+5. Check if an entry with `"matcher": "<skill>"` already exists. If so, announce **"Skill `<skill>` is already traced."** and exit.
+6. Add a new entry to the `UserPromptExpansion` array:
 
    ```json
    {
-     "type": "command",
-     "if": "Skill(<skill>:*)",
-     "command": "sed -i.bak 's/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/' .claude/settings.local.json && rm -f .claude/settings.local.json.bak && echo 'MLflow tracing: ON (<skill> invoked). IMPORTANT: You MUST turn tracing off when this skill fully completes (all follow-ups resolved, final output delivered). Run: sed -i.bak '\"'\"'s/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/'\"'\"' .claude/settings.local.json && rm -f .claude/settings.local.json.bak — then announce: MLflow tracing: OFF'"
+     "matcher": "<skill>",
+     "hooks": [
+       {
+         "type": "command",
+         "command": "sed -i.bak 's/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/' .claude/settings.local.json && rm -f .claude/settings.local.json.bak && echo 'MLflow tracing: ON (<skill> invoked). IMPORTANT: You MUST turn tracing off when this skill fully completes (all follow-ups resolved, final output delivered). Run: sed -i.bak '\"'\"'s/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"true\"/\"MLFLOW_CLAUDE_TRACING_ENABLED\": \"false\"/'\"'\"' .claude/settings.local.json && rm -f .claude/settings.local.json.bak — then announce: MLflow tracing: OFF'"
+       }
+     ]
    }
    ```
 
-8. Write the file back.
-9. Announce: **"Skill `<skill>` added to traced skills. Tracing will auto-enable when `/<skill>` is invoked."**
+7. Write the file back.
+8. Announce: **"Skill `<skill>` added to traced skills. Tracing will auto-enable when `/<skill>` is invoked."**
 
 **Note on the hook command**: The echo output becomes context that Claude sees. It includes an instruction telling Claude to turn tracing back off when the skill work is fully complete. Claude judges when the skill is done (even across multi-turn follow-ups) and runs the sed command to disable tracing, then announces "MLflow tracing: OFF".
 
@@ -117,17 +122,16 @@ Exit after.
 
 ## Step 4: Handle `off <skill>` (remove skill from traced list)
 
-Removes the `if`-filtered hook entry for the named skill.
+Removes the `UserPromptExpansion` hook entry for the named skill.
 
 1. Read `.claude/settings.local.json`
 2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
-3. Find `hooks.PreToolUse` → entry with `"matcher": "Skill"` → hook with `"if": "Skill(<skill>:*)"`.
+3. Find `hooks.UserPromptExpansion` → entry with `"matcher": "<skill>"`.
 4. If not found, announce **"Skill `<skill>` is not in the traced skills list."** and exit.
-5. Remove that hook entry from the array.
-6. If the matcher's `hooks` array is now empty, remove the entire matcher entry.
-7. If the `PreToolUse` array is now empty, remove it entirely.
-8. Write the file back.
-9. Announce: **"Skill `<skill>` removed from traced skills."**
+5. Remove that entry from the array.
+6. If the `UserPromptExpansion` array is now empty, remove it entirely.
+7. Write the file back.
+8. Announce: **"Skill `<skill>` removed from traced skills."**
 
 Exit after.
 
@@ -139,7 +143,7 @@ Quick token refresh — skips mlflow install, hook setup, and reconfiguration. O
 
 1. Read `.claude/settings.local.json`
 2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
-3. Authenticate to ROSA using the same flow as Step 9 (oc login with throwaway kubeconfig, or manual token paste if oc is unavailable). **No confirmation needed** — proceed directly.
+3. Authenticate to ROSA using the same flow as Step 10 (oc login with throwaway kubeconfig, or manual token paste if oc is unavailable). **No confirmation needed** — proceed directly.
 4. Update `MLFLOW_TRACKING_TOKEN` in the `env` block of `.claude/settings.local.json` with the new token.
 5. Verify the new token works:
    ```bash
@@ -164,7 +168,7 @@ Read `.claude/settings.local.json` and run these checks:
 
 1. **Config exists** — check `env.MLFLOW_TRACKING_URI`, `env.MLFLOW_TRACKING_TOKEN`, `env.MLFLOW_EXPERIMENT_NAME` are present
 2. **Tracing state** — read `env.MLFLOW_CLAUDE_TRACING_ENABLED` (true/false)
-3. **Traced skills** — list all skills that have `if` entries in the PreToolUse Skill matcher (extract skill names from `"if": "Skill(<name>:*)"` patterns)
+3. **Traced skills** — list all skills that have entries in the `UserPromptExpansion` array (extract skill names from `"matcher"` values)
 4. **MLflow reachable** — use the token and workspace to call the MLflow experiments API:
    ```bash
    curl -s -o /dev/null -w "%{http_code}" \
@@ -201,7 +205,7 @@ Exit after reporting.
 Read `.claude/settings.local.json`:
 
 1. Remove all `MLFLOW_*` keys from the `env` block
-2. Remove any PreToolUse hook entries with matcher `Skill` that contain `MLFLOW_CLAUDE_TRACING_ENABLED`
+2. Remove any `UserPromptExpansion` hook entries that contain `MLFLOW_CLAUDE_TRACING_ENABLED` in their command
 3. If any hook array becomes empty after removal, remove the array entirely
 4. If the `hooks` object becomes empty, remove it entirely
 5. Write the file back (preserving other config)
@@ -311,7 +315,7 @@ Read `.claude/settings.local.json` (or create it if it doesn't exist). Merge the
 }
 ```
 
-If `--skills=a,b,c` was provided, also add per-skill PreToolUse hook entries following the same pattern as Step 3 (`on <skill>`).
+If `--skills=a,b,c` was provided, also add per-skill `UserPromptExpansion` hook entries following the same pattern as Step 3 (`on <skill>`). Each skill gets its own entry with `"matcher": "<skill-name>"`.
 
 Preserve all existing config in settings.local.json (permissions, other env vars, other hooks).
 
@@ -336,8 +340,8 @@ Preserve all existing config in settings.local.json (permissions, other env vars
 ## How per-skill tracing works
 
 1. User runs `/trace-setup --skills=preflight` (or `/trace-setup` then `/trace-setup on preflight`)
-2. This adds a `PreToolUse` hook in settings.local.json with `"matcher": "Skill"` and `"if": "Skill(preflight:*)"`
-3. When the user runs `/preflight`, the hook fires:
+2. This adds a `UserPromptExpansion` hook in settings.local.json with `"matcher": "preflight"`
+3. When the user types `/preflight`, the hook fires before the skill expands:
    - Flips `MLFLOW_CLAUDE_TRACING_ENABLED` from `false` to `true` via sed
    - Echoes a message back to Claude: "MLflow tracing: ON (preflight invoked). IMPORTANT: You MUST turn tracing off when this skill fully completes..."
 4. Claude sees this instruction as context and follows it
@@ -349,12 +353,13 @@ Preserve all existing config in settings.local.json (permissions, other env vars
 
 - **Env vars in settings.local.json** — never committed, per-user secrets
 - **Static hooks in hooks/hooks.json** — ship with the plugin, auto-registered
-- **Dynamic hooks (PreToolUse per-skill) in settings.local.json** — user-configured
+- **Dynamic hooks (UserPromptExpansion per-skill) in settings.local.json** — user-configured
+- **Use UserPromptExpansion, NOT PreToolUse** — skills invoked via `/skillname` are prompt expansions, not tool calls
+- **Each skill gets its own matcher entry** — `"matcher": "<skill-name>"` matches when `/<skill-name>` is typed
 - **`on`/`off` (global) are instant** — no confirmation, no chatter, just edit and announce
-- **`on`/`off` with skill name** modifies the PreToolUse hook array in settings.local.json
+- **`on`/`off` with skill name** modifies the UserPromptExpansion hook array in settings.local.json
 - **Present plan first for install** — show what will happen, get yes/no, then run
 - **Never switch oc context** — always `KUBECONFIG=$(mktemp)`, reuse the same tempfile
 - **Always announce state changes** — when tracing turns on or off, say so clearly
-- **Per-skill hooks use `if` field** — `"if": "Skill(<name>:*)"` filters on the skill name argument
 - **Auto-disable via context** — the hook echo instructs Claude to turn tracing off when the skill completes
 - **No chatter** — report results, not process
