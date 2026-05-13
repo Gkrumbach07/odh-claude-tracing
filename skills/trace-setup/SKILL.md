@@ -143,7 +143,7 @@ Quick token refresh — skips mlflow install, hook setup, and reconfiguration. O
 
 1. Read `.claude/settings.local.json`
 2. If `MLFLOW_TRACKING_URI` is not present in `env`, error: "Tracing not installed. Run `/trace-setup` first."
-3. Authenticate to ROSA using the same flow as Step 10 (oc login with throwaway kubeconfig, or manual token paste if oc is unavailable). **No confirmation needed** — proceed directly.
+3. Authenticate to ROSA (oc login with throwaway kubeconfig, or manual token paste if oc is unavailable — same auth flow as the install). **No confirmation needed** — proceed directly.
 4. Update `MLFLOW_TRACKING_TOKEN` in the `env` block of `.claude/settings.local.json` with the new token.
 5. Verify the new token works:
    ```bash
@@ -164,12 +164,14 @@ Exit after.
 
 ## Step 6: Handle `status`
 
-Read `.claude/settings.local.json` and run these checks:
+Read both `.claude/settings.local.json` and `.claude/settings.json` and run these checks:
 
-1. **Config exists** — check `env.MLFLOW_TRACKING_URI`, `env.MLFLOW_TRACKING_TOKEN`, `env.MLFLOW_EXPERIMENT_NAME` are present
+1. **Config exists** — check `env.MLFLOW_TRACKING_URI`, `env.MLFLOW_TRACKING_TOKEN`, `env.MLFLOW_EXPERIMENT_NAME` are present in settings.local.json
 2. **Tracing state** — read `env.MLFLOW_CLAUDE_TRACING_ENABLED` (true/false)
-3. **Traced skills** — list all skills that have entries in the `UserPromptExpansion` array (extract skill names from `"matcher"` values)
-4. **MLflow reachable** — use the token and workspace to call the MLflow experiments API:
+3. **Traced skills** — list all skills that have entries in the `UserPromptExpansion` array in settings.local.json (extract skill names from `"matcher"` values)
+4. **Stop hook** — check settings.json `hooks.Stop` contains `mlflow autolog claude stop-hook`
+5. **SessionStart hook** — check settings.json `hooks.SessionStart` contains the MLflow check
+6. **MLflow reachable** — use the token and workspace to call the MLflow experiments API:
    ```bash
    curl -s -o /dev/null -w "%{http_code}" \
      -X POST \
@@ -182,7 +184,7 @@ Read `.claude/settings.local.json` and run these checks:
    - 200 = connected
    - 401/403 = token expired
    - Other = connection issue
-5. **Experiment exists** — parse the response to confirm the experiment is accessible
+7. **Experiment exists** — parse the response to confirm the experiment is accessible
 
 Report a table:
 
@@ -191,6 +193,8 @@ Report a table:
 | Config in settings.local.json | OK / MISSING |
 | Tracing state | ON / OFF |
 | Traced skills | preflight, jira-triage / (none) |
+| Stop hook (settings.json) | OK / MISSING |
+| SessionStart hook (settings.json) | OK / MISSING |
 | MLflow connection | OK / TOKEN EXPIRED / UNREACHABLE |
 | Experiment `<name>` | OK / NOT FOUND |
 
@@ -274,7 +278,7 @@ python3 -m venv .venv
 .venv/bin/pip install -q "mlflow[genai]>=3.5"
 ```
 
-Store the resolved absolute path as `MLFLOW_CMD` (e.g., `/opt/homebrew/bin/mlflow` or `/path/to/project/.venv/bin/mlflow`).
+Store the resolved absolute path as `MLFLOW_CMD` (e.g., `/opt/homebrew/bin/mlflow` or `/path/to/project/.venv/bin/mlflow`). If mlflow is only in a local `.venv`, the user may need to ensure it's on PATH or symlinked so the Stop hook can find it.
 
 ## Step 10: Authenticate to ROSA
 
@@ -344,7 +348,7 @@ Read the file (or create it if it doesn't exist). Add these hooks (append to exi
     "hooks": [
       {
         "type": "command",
-        "command": "which mlflow >/dev/null 2>&1 && [ \"$MLFLOW_CLAUDE_TRACING_ENABLED\" = \"true\" ] && mlflow autolog claude stop-hook || true"
+        "command": "which mlflow >/dev/null 2>&1 && mlflow autolog claude stop-hook || true"
       }
     ]
   }
