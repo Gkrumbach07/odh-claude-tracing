@@ -7,27 +7,25 @@ argument-hint: "[on [skill] | off [skill] | reauth | status | uninstall] [--skil
 
 # Production Tracing Setup
 
-One-command setup for MLflow tracing. Config lives in `settings.local.json` (never committed). Hooks ship with the plugin via `hooks/hooks.json` (auto-registered). Supports live on/off toggling and per-skill auto-tracing.
+One-command setup for MLflow tracing. Supports live on/off toggling and per-skill auto-tracing.
 
-## Key Discovery
+## Key Discoveries
 
-Editing `MLFLOW_CLAUDE_TRACING_ENABLED` in `.claude/settings.local.json` toggles tracing **per-turn in real time** — no restart needed. This enables:
-- Live `on`/`off` commands
-- Hook-based triggers that auto-enable tracing for specific skills
-- Context-based auto-disable when a skill completes
+1. Editing `MLFLOW_CLAUDE_TRACING_ENABLED` in `.claude/settings.local.json` toggles tracing **per-turn in real time** — but only when Claude uses the Edit tool (external `sed` edits are not detected).
+2. Skills invoked via `/skillname` are **prompt expansions**, not tool calls — use `UserPromptExpansion` hooks, not `PreToolUse`.
+3. `UserPromptExpansion` stdout is invisible to Claude — must use JSON with `hookSpecificOutput.additionalContext`.
+4. `SessionStart` hooks only work from `.claude/settings.json`, not settings.local.json. Use `systemMessage` in JSON output.
 
 ## Architecture
 
-Everything lives in `.claude/settings.local.json` (never committed):
+Config is split across two files:
 
-| What | Where |
-|------|-------|
-| Stop hook (sends traces) | `settings.local.json` hooks |
-| SessionStart hook (health check) | `settings.local.json` hooks |
-| UserPromptExpansion hooks (per-skill) | `settings.local.json` hooks |
-| Env vars (token, URI, etc.) | `settings.local.json` env |
-
-**Important**: Skills invoked via `/skillname` are prompt expansions, NOT tool calls. Use `UserPromptExpansion` hooks (not `PreToolUse`) to intercept skill invocations. The matcher matches directly on the skill name. UserPromptExpansion stdout is invisible to Claude — must use JSON with `additionalContext` in `hookSpecificOutput`. Claude must use the Edit tool (not sed) to flip settings, because Claude Code only re-reads settings.local.json on internal file changes.
+| What | Where | Why |
+|------|-------|-----|
+| SessionStart hook (health check) | `.claude/settings.json` | SessionStart only fires from settings.json |
+| Stop hook (sends traces) | `.claude/settings.json` | Same reason — lifecycle hooks need settings.json |
+| Env vars (token, URI, etc.) | `.claude/settings.local.json` | Per-user secrets, never committed |
+| UserPromptExpansion hooks (per-skill) | `.claude/settings.local.json` | Dynamic, user-configured, never committed |
 
 ## Prerequisites
 
@@ -118,7 +116,7 @@ Adds a `UserPromptExpansion` hook entry so tracing auto-enables when the named s
 7. Write the file back.
 8. Announce: **"Skill `<skill>` added to traced skills. Tracing will auto-enable when `/<skill>` is invoked."**
 
-**Important: Why JSON output, not plain text.** `UserPromptExpansion` hooks ignore plain stdout — only JSON with `additionalContext` in `hookSpecificOutput` is visible to Claude. The hook outputs structured JSON that injects a tracing instruction into the prompt context. Claude then uses the Edit tool to flip the setting, which triggers Claude Code to re-read settings.local.json (external `sed` edits are not detected).
+**Important: Why JSON output, not plain text.** `UserPromptExpansion` hooks ignore plain stdout — only JSON with `additionalContext` in `hookSpecificOutput` is visible to Claude. Claude then uses the Edit tool to flip the setting, which triggers Claude Code to re-read settings.local.json.
 
 Exit after.
 
@@ -204,15 +202,22 @@ Exit after reporting.
 
 ## Step 7: Handle `uninstall`
 
-Read `.claude/settings.local.json`:
+Remove config from **both** files:
 
+**From `.claude/settings.local.json`:**
 1. Remove all `MLFLOW_*` keys from the `env` block
-2. Remove the Stop hook entry containing `mlflow autolog claude stop-hook`
-3. Remove the SessionStart hook entry containing the MLflow connection check
-4. Remove any `UserPromptExpansion` hook entries that contain `MLFLOW_CLAUDE_TRACING_ENABLED` in their `additionalContext`
-5. If any hook array becomes empty after removal, remove the array entirely
-6. If the `hooks` object becomes empty, remove it entirely
-7. Write the file back (preserving other config)
+2. Remove any `UserPromptExpansion` hook entries that contain `MLFLOW_CLAUDE_TRACING_ENABLED` in their `additionalContext`
+3. If any hook array becomes empty after removal, remove the array entirely
+4. If the `hooks` object becomes empty, remove it entirely
+
+**From `.claude/settings.json`:**
+5. Remove the Stop hook entry containing `mlflow autolog claude stop-hook`
+6. Remove the SessionStart hook entry containing `MLflow Tracing`
+7. If any hook array becomes empty after removal, remove the array entirely
+8. If the `hooks` object becomes empty, remove it entirely
+9. If settings.json is now empty (`{}`), delete the file
+
+Write both files back (preserving other config).
 
 Report: "Tracing removed."
 
@@ -230,6 +235,7 @@ Exit.
 > 1. Ensure `mlflow` is installed (needed for the stop-hook that sends traces)
 > 2. Authenticate to the ROSA cluster (opens browser for SSO — your current `oc` context is NOT affected)
 > 3. Write env vars to `.claude/settings.local.json` (never committed)
+> 4. Write lifecycle hooks to `.claude/settings.json`
 >
 > **Mode:** `<always on>` or `<off by default, auto-on for: skill1, skill2>`
 >
@@ -268,7 +274,7 @@ python3 -m venv .venv
 .venv/bin/pip install -q "mlflow[genai]>=3.5"
 ```
 
-Store the resolved absolute path as `MLFLOW_CMD` (e.g., `/opt/homebrew/bin/mlflow` or `/path/to/project/.venv/bin/mlflow`). The plugin's `hooks/hooks.json` references `mlflow` by name — if mlflow is only in a local `.venv`, the user may need to ensure it's on PATH or symlinked.
+Store the resolved absolute path as `MLFLOW_CMD` (e.g., `/opt/homebrew/bin/mlflow` or `/path/to/project/.venv/bin/mlflow`).
 
 ## Step 10: Authenticate to ROSA
 
@@ -302,11 +308,11 @@ rm -f $TMPKUBE
 
 Use AskUserQuestion to collect the token.
 
-## Step 11: Write config to settings.local.json
+## Step 11: Write config
 
-Read `.claude/settings.local.json` (or create it if it doesn't exist). Merge the following into the file, preserving all existing config (permissions, other env vars, other hooks).
+### To `.claude/settings.local.json`
 
-### Env vars
+Read the file (or create it if it doesn't exist). Merge these env vars into the `env` block:
 
 ```json
 {
@@ -321,15 +327,20 @@ Read `.claude/settings.local.json` (or create it if it doesn't exist). Merge the
 }
 ```
 
-### Hooks
+If `--skills=a,b,c` was provided, also add `UserPromptExpansion` hook entries following the same pattern as Step 3 (`on <skill>`).
 
-Add these hooks (append to existing hook arrays, do not replace other entries):
+Preserve all existing config (permissions, other env vars, other hooks).
+
+### To `.claude/settings.json`
+
+Read the file (or create it if it doesn't exist). Add these hooks (append to existing hook arrays, do not replace other entries):
 
 **Stop hook** — sends traces to MLflow on session exit:
 
 ```json
 "Stop": [
   {
+    "matcher": "",
     "hooks": [
       {
         "type": "command",
@@ -340,7 +351,7 @@ Add these hooks (append to existing hook arrays, do not replace other entries):
 ]
 ```
 
-**SessionStart hook** — health check on session start:
+**SessionStart hook** — reports tracing status on session start:
 
 ```json
 "SessionStart": [
@@ -349,22 +360,21 @@ Add these hooks (append to existing hook arrays, do not replace other entries):
     "hooks": [
       {
         "type": "command",
-        "statusMessage": "Checking MLflow tracing...",
-        "command": "if [ -z \"$MLFLOW_TRACKING_URI\" ]; then exit 0; fi; curl -sf -X POST -H \"Authorization: Bearer $MLFLOW_TRACKING_TOKEN\" -H \"Content-Type: application/json\" -H \"X-Mlflow-Workspace: $MLFLOW_WORKSPACE\" -d '{\"max_results\":1}' \"$MLFLOW_TRACKING_URI/api/2.0/mlflow/experiments/search\" > /dev/null && echo \"MLflow tracing: connected (state: $MLFLOW_CLAUDE_TRACING_ENABLED)\" || echo 'MLflow tracing: NOT connected (run /trace-setup reauth to refresh token)'"
+        "command": "if [ -z \"$MLFLOW_TRACKING_URI\" ]; then exit 0; fi; if curl -sf -X POST -H \"Authorization: Bearer $MLFLOW_TRACKING_TOKEN\" -H \"Content-Type: application/json\" -H \"X-Mlflow-Workspace: $MLFLOW_WORKSPACE\" -d '{\"max_results\":1}' \"$MLFLOW_TRACKING_URI/api/2.0/mlflow/experiments/search\" > /dev/null 2>&1; then if [ \"$MLFLOW_CLAUDE_TRACING_ENABLED\" = \"true\" ]; then echo '{\"systemMessage\":\"MLflow Tracing ON\"}'; else echo '{\"systemMessage\":\"MLflow Tracing OFF\"}'; fi; else echo '{\"systemMessage\":\"MLflow Tracing DISCONNECTED (run /trace-setup reauth)\"}'; fi"
       }
     ]
   }
 ]
 ```
 
-**Per-skill hooks** — if `--skills=a,b,c` was provided, add `UserPromptExpansion` entries following the same pattern as Step 3 (`on <skill>`). Each skill gets its own entry with `"matcher": "<skill-name>"`.
+Preserve all existing config in settings.json.
 
 ## Step 12: Report
 
 > **Tracing installed.**
 > - MLflow: `<uri>` (experiment: `<experiment>`, workspace: `<workspace>`)
 > - Mode: `<always on>` or `<off by default, auto-on for: skill1, skill2>`
-> - Config: `.claude/settings.local.json` (not committed)
+> - Config: `.claude/settings.local.json` (env vars) + `.claude/settings.json` (hooks)
 >
 > Token expires in ~24h. Run `/trace-setup reauth` to refresh.
 >
@@ -383,23 +393,22 @@ Add these hooks (append to existing hook arrays, do not replace other entries):
 2. This adds a `UserPromptExpansion` hook in settings.local.json with `"matcher": "preflight"`
 3. When the user types `/preflight`, the hook fires and outputs JSON with `additionalContext`
 4. Claude sees the tracing instruction injected into the prompt context
-5. Claude uses the Edit tool to change `MLFLOW_CLAUDE_TRACING_ENABLED` from `false` to `true` in settings.local.json — this triggers Claude Code to re-read settings, enabling tracing
+5. Claude uses the Edit tool to change `MLFLOW_CLAUDE_TRACING_ENABLED` from `false` to `true` — this triggers Claude Code to re-read settings, enabling tracing
 6. Claude announces "MLflow tracing: ON" and proceeds with the skill
 7. The skill runs — possibly across multiple turns with follow-up questions
 8. When Claude determines the skill work is fully complete, it uses Edit to change ENABLED back to `false` and announces "MLflow tracing: OFF"
-9. As a safety net, the plugin's Stop hook also resets tracing to `false` on session exit
-
-**Why Edit tool, not sed**: Claude Code only re-reads settings.local.json when it detects internal file changes (via Edit/Write tools). External modifications (like `sed` from a hook subprocess) are not detected, so the tracing flag wouldn't take effect.
+9. The Stop hook sends traces on session exit
 
 ## Rules
 
-- **Everything in settings.local.json** — env vars, all hooks, never committed
-- **Use UserPromptExpansion, NOT PreToolUse** — skills invoked via `/skillname` are prompt expansions, not tool calls
-- **UserPromptExpansion needs JSON output** — plain stdout is invisible to Claude; use `printf` with `hookSpecificOutput.additionalContext`
-- **Claude must use Edit tool to flip settings** — external `sed` edits are not detected by Claude Code; only internal Edit/Write triggers settings re-read
-- **Each skill gets its own matcher entry** — `"matcher": "<skill-name>"` matches when `/<skill-name>` is typed
+- **Env vars + UserPromptExpansion in settings.local.json** — never committed
+- **SessionStart + Stop in settings.json** — lifecycle hooks only work from settings.json
+- **Use UserPromptExpansion, NOT PreToolUse** — `/skillname` is a prompt expansion, not a tool call
+- **UserPromptExpansion needs JSON output** — use `hookSpecificOutput.additionalContext`
+- **SessionStart uses systemMessage** — `echo '{"systemMessage":"..."}'`
+- **Claude must use Edit tool to flip settings** — external `sed` edits are not detected
+- **Each skill gets its own matcher entry** — `"matcher": "<skill-name>"`
 - **`on`/`off` (global) are instant** — no confirmation, no chatter, just edit and announce
-- **`on`/`off` with skill name** modifies the UserPromptExpansion hook array in settings.local.json
 - **Present plan first for install** — show what will happen, get yes/no, then run
 - **Never switch oc context** — always `KUBECONFIG=$(mktemp)`, reuse the same tempfile
 - **Always announce state changes** — when tracing turns on or off, say so clearly
